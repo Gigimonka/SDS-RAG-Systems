@@ -559,21 +559,49 @@ def render_inline(node: ET.Element, ctx: dict, *, allow_links: bool = True) -> s
 
 
 def table_to_md(table: ET.Element, ctx: dict) -> str:
+    source_rows: list[list[ET.Element]] = []
     rows: list[list[str]] = []
     for row in children(table, "tr"):
+        cell_nodes = [
+            cell_node
+            for cell_node in list(row)
+            if local_name(cell_node.tag) in {"td", "th"}
+        ]
         cells: list[str] = []
-        for cell_node in list(row):
-            if local_name(cell_node.tag) not in {"td", "th"}:
-                continue
+        for cell_node in cell_nodes:
             value = render_blocks(list(cell_node), ctx, in_table=True)
             value = value.replace("|", "\\|").replace("\n", "<br />").strip()
             cells.append(value or " ")
         if cells:
+            source_rows.append(cell_nodes)
             rows.append(cells)
     if not rows:
         return ""
+
+    # Help&Manual often uses a 1x1 table only as a layout container (for
+    # example, around a long bullet list). Turning it into a Markdown table
+    # creates a header-only table and flattens all nested blocks into one very
+    # long line. Unwrap the cell instead and preserve its original blocks.
+    if len(source_rows) == 1 and len(source_rows[0]) == 1:
+        cell = source_rows[0][0]
+        value = render_blocks(list(cell), ctx)
+        return value or render_inline(cell, ctx).strip()
+
     width = max(len(row) for row in rows)
     rows = [row + [" "] * (width - len(row)) for row in rows]
+
+    # A one-row source table has no separate header. Markdown requires one,
+    # so add visually empty, but non-empty, header cells and retain the source
+    # row as data. This avoids header-only tables that crash some Wiki.js
+    # rendering-module combinations.
+    if len(rows) == 1:
+        lines = [
+            "| " + " | ".join(["&nbsp;"] * width) + " |",
+            "| " + " | ".join(["---"] * width) + " |",
+            "| " + " | ".join(rows[0]) + " |",
+        ]
+        return "\n".join(lines)
+
     lines = [
         "| " + " | ".join(rows[0]) + " |",
         "| " + " | ".join(["---"] * width) + " |",

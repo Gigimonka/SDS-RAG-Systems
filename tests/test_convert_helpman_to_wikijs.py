@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from tools.convert_helpman_to_wikijs import parse_xml
+from tools.convert_helpman_to_wikijs import parse_xml, table_to_md
 
 
 class ParseXmlTest(unittest.TestCase):
@@ -30,6 +31,51 @@ class ParseXmlTest(unittest.TestCase):
         self.assertEqual(root.tag if root is not None else None, "topic")
         self.assertFalse(recovered)
         self.assertIsNone(error)
+
+
+class TableToMarkdownTest(unittest.TestCase):
+    def test_single_cell_layout_table_is_unwrapped(self) -> None:
+        table = ET.fromstring(
+            """
+            <table>
+              <tr>
+                <td>
+                  <para><text>Полный список</text></para>
+                  <list type="ul">
+                    <li><text>Первый</text></li>
+                    <li><text>Второй</text></li>
+                  </list>
+                </td>
+              </tr>
+            </table>
+            """
+        )
+
+        markdown = table_to_md(table, {"variables": {}})
+
+        self.assertEqual(markdown, "Полный список\n\n- Первый\n- Второй")
+        self.assertNotIn("| --- |", markdown)
+
+    def test_single_row_data_table_gets_safe_header(self) -> None:
+        table = ET.fromstring(
+            """
+            <table>
+              <tr>
+                <td><para><text>Статус чека</text></para></td>
+                <td><para><text>Требуется</text></para></td>
+              </tr>
+            </table>
+            """
+        )
+
+        markdown = table_to_md(table, {"variables": {}})
+
+        self.assertEqual(
+            markdown,
+            "| &nbsp; | &nbsp; |\n"
+            "| --- | --- |\n"
+            "| Статус чека | Требуется |",
+        )
 
 
 if __name__ == "__main__":
