@@ -1,7 +1,7 @@
 # Wiki.js RAG
 
 Hybrid RAG-система для поиска и ответов по внутренней документации Wiki.js.
-Dense-поиск BGE-M3 и sparse-поиск BM25 объединяются в Qdrant через RRF,
+Dense-поиск ai-forever/FRIDA и sparse-поиск BM25 объединяются в Qdrant через RRF,
 после чего FastAPI передаёт найденный контекст в vLLM. API совместим с OpenAI
 Chat Completions и может использоваться из Open WebUI.
 

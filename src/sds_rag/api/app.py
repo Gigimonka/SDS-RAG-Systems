@@ -177,7 +177,7 @@ app = FastAPI(
     title="Wiki.js Hybrid RAG API",
     description=(
         "Hybrid RAG по документации Wiki.js: "
-        "BGE-M3 dense + BM25 sparse + RRF "
+        "ai-forever/FRIDA dense + BM25 sparse + RRF "
         "+ OpenAI-compatible API "
         "для Open WebUI"
     ),
@@ -697,7 +697,7 @@ def hybrid_query_points(
     """
     Два независимых поиска:
 
-    1. BGE-M3 dense — ищет по смыслу.
+    1. ai-forever/FRIDA dense — ищет по смыслу.
     2. BM25 sparse — ищет точные слова,
        коды, процедуры и идентификаторы.
 
