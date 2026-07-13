@@ -217,8 +217,8 @@ VLLM_USE_FLASHINFER_SAMPLER=0 \
     --host 127.0.0.1 \
     --port 8001 \
     --dtype half \
-    --max-model-len 16384 \
-    --gpu-memory-utilization 0.72 \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.85 \
     --default-chat-template-kwargs '{"enable_thinking": false}'
 ```
 
