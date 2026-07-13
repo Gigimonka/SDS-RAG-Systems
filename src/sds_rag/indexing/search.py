@@ -25,7 +25,7 @@ COLLECTION_NAME = os.getenv(
 
 MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
-    "ai-forever/FRIDA",
+    "BAAI/bge-m3",
 )
 
 
@@ -44,11 +44,6 @@ def main() -> None:
     model = SentenceTransformer(
         MODEL_NAME,
         device=device,
-        model_kwargs=(
-            {"torch_dtype": torch.float16}
-            if device == "cuda"
-            else {}
-        ),
     )
 
     client = QdrantClient(
@@ -76,10 +71,12 @@ def main() -> None:
             break
 
         query_vector = model.encode(
-                query,
-                prompt_name="search_query",
-                normalize_embeddings=True,
-                convert_to_numpy=True,
+
+            query,
+
+            normalize_embeddings=True,
+
+            convert_to_numpy=True,
         )
 
         results = client.query_points(
