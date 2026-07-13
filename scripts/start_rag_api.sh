@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-ENV_FILE="/home/gigimon/project/wikijs/.env"
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${PROJECT_ROOT}/.env"
 
 if [[ -f "${ENV_FILE}" ]]; then
   set -a
@@ -11,11 +12,8 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-cd /home/gigimon/project
+cd "${PROJECT_ROOT}"
 
 export RAG_API_KEY="${RAG_API_KEY:-sk-local-rag-change-me}"
 
-exec uv run uvicorn api:app \
-  --app-dir help/rag-indexer \
-  --host 0.0.0.0 \
-  --port 8000
+exec uv run sds-rag-api

@@ -1,29 +1,58 @@
-# Python-generated files
+# Python bytecode and build artifacts
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+
+# Test, type-checker and linter caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+
+# Coverage reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Virtual environments
 .venv/
 .venv-vllm/
+venv/
+env/
 
 # Secrets
 .env
 .env.*
 !.env.example
 
-# SVN metadata
+# Editors and IDEs
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Version-control metadata from imported documentation
 .svn/
 
-# Private source documentation
-/help/Common_Project26-2/
+# Private source documentation and generated Wiki.js content
+/data/source/
+/data/wikijs_export/
+/data/wikijs_export-conversion-report.json
 
-# Generated Wiki.js content: около 843 МБ
-/help/wikijs_export/
-/help/wikijs_export-conversion-report.json
-
-# Logs
+# Runtime files and logs
 *.log
+*.pid
+*.tmp

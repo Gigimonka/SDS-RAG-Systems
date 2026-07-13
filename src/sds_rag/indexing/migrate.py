@@ -9,6 +9,8 @@ from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models
 from tqdm import tqdm
 
+from ..core.helpers import sparse_embedding_to_vector as sparse_to_qdrant
+
 
 DEFAULT_QDRANT_URL = os.getenv(
     "QDRANT_URL",
@@ -225,36 +227,6 @@ def make_sparse_text(
         part
         for part in parts
         if part
-    )
-
-
-def sparse_to_qdrant(
-    embedding: Any,
-) -> models.SparseVector:
-    indices = embedding.indices
-    values = embedding.values
-
-    if hasattr(
-        indices,
-        "tolist",
-    ):
-        indices = indices.tolist()
-
-    if hasattr(
-        values,
-        "tolist",
-    ):
-        values = values.tolist()
-
-    return models.SparseVector(
-        indices=[
-            int(item)
-            for item in indices
-        ],
-        values=[
-            float(item)
-            for item in values
-        ],
     )
 
 

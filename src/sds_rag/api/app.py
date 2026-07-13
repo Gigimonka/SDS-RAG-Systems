@@ -1,11 +1,9 @@
 import asyncio
 import json
-import os
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -13,265 +11,62 @@ import torch
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 
-
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
-
-QDRANT_URL = os.getenv(
-    "QDRANT_URL",
-    "http://127.0.0.1:6333",
-)
-
-COLLECTION_NAME = os.getenv(
-    "QDRANT_COLLECTION",
-    "wikijs_docs_hybrid",
-)
-
-DENSE_VECTOR_NAME = os.getenv(
-    "DENSE_VECTOR_NAME",
-    "dense",
-)
-
-SPARSE_VECTOR_NAME = os.getenv(
-    "SPARSE_VECTOR_NAME",
-    "sparse",
-)
-
-SPARSE_EMBEDDING_MODEL = os.getenv(
-    "SPARSE_EMBEDDING_MODEL",
-    "Qdrant/bm25",
-)
-
-SPARSE_LANGUAGE = os.getenv(
-    "SPARSE_LANGUAGE",
-    "russian",
-)
-
-HYBRID_PREFETCH_LIMIT = int(
-    os.getenv(
-        "HYBRID_PREFETCH_LIMIT",
-        "40",
-    )
-)
-
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL",
-    "BAAI/bge-m3",
-)
-
-WIKI_BASE_URL = os.getenv(
-    "WIKI_BASE_URL",
-    "http://localhost:3000",
-)
-
-LLM_URL = os.getenv(
-    "LLM_URL",
-    "http://127.0.0.1:8001/v1",
-)
-
-LLM_MODEL = os.getenv(
-    "LLM_MODEL",
-    "Qwen/Qwen3-8B-AWQ",
-)
-
-# Именно эту "модель" увидит Open WebUI.
-RAG_MODEL_ID = os.getenv(
-    "RAG_MODEL_ID",
-    "sds-wiki-rag",
-)
-
-RAG_MODEL_NAME = os.getenv(
-    "RAG_MODEL_NAME",
-    "Справочная система SDS",
-)
-
-# Ключ должен совпадать с OPENAI_API_KEY
-# в docker-compose Open WebUI.
-RAG_API_KEY = os.getenv(
-    "RAG_API_KEY",
-    "sk-local-rag-change-me",
-)
-
-RETRIEVAL_LIMIT = int(
-    os.getenv(
-        "RETRIEVAL_LIMIT",
-        "12",
-    )
-)
-
-MAX_CONTEXTS = int(
-    os.getenv(
-        "MAX_CONTEXTS",
-        "5",
-    )
-)
-
-# Полный лимит последовательности, с которым запущен vLLM.
-MODEL_CONTEXT_TOKENS = int(
-    os.getenv(
-        "MODEL_CONTEXT_TOKENS",
-        "16384",
-    )
-)
-
-# Желаемый размер ответа.
-DEFAULT_MAX_OUTPUT_TOKENS = int(
-    os.getenv(
-        "DEFAULT_MAX_OUTPUT_TOKENS",
-        "900",
-    )
-)
-
-MAX_OUTPUT_TOKENS = int(
-    os.getenv(
-        "MAX_OUTPUT_TOKENS",
-        "1200",
-    )
-)
-
-MIN_OUTPUT_TOKENS = int(
-    os.getenv(
-        "MIN_OUTPUT_TOKENS",
-        "256",
-    )
-)
-
-# Запас на различия между локальным подсчётом токенов
-# и фактическим chat template внутри vLLM.
-CONTEXT_SAFETY_MARGIN_TOKENS = int(
-    os.getenv(
-        "CONTEXT_SAFETY_MARGIN_TOKENS",
-        "512",
-    )
-)
-
-MAX_HISTORY_MESSAGES = int(
-    os.getenv(
-        "MAX_HISTORY_MESSAGES",
-        "4",
-    )
-)
-
-MAX_HISTORY_TOKENS = int(
-    os.getenv(
-        "MAX_HISTORY_TOKENS",
-        "1000",
-    )
-)
-
-MAX_HISTORY_MESSAGE_TOKENS = int(
-    os.getenv(
-        "MAX_HISTORY_MESSAGE_TOKENS",
-        "400",
-    )
-)
-
-# Один найденный раздел не должен занять
-# почти всё окно модели.
-MAX_CONTEXT_ITEM_TOKENS = int(
-    os.getenv(
-        "MAX_CONTEXT_ITEM_TOKENS",
-        "2200",
-    )
-)
-
-MIN_CONTEXT_ITEM_TOKENS = int(
-    os.getenv(
-        "MIN_CONTEXT_ITEM_TOKENS",
-        "220",
-    )
-)
-
-TOKENIZER_MODEL = os.getenv(
-    "TOKENIZER_MODEL",
+from ..core.config import (
+    API_VERSION,
+    COLLECTION_NAME,
+    CONTEXT_SAFETY_MARGIN_TOKENS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DENSE_VECTOR_NAME,
+    EMBEDDING_MODEL,
+    HYBRID_PREFETCH_LIMIT,
     LLM_MODEL,
+    LLM_URL,
+    MAX_CONTEXT_ITEM_TOKENS,
+    MAX_CONTEXTS,
+    MAX_HISTORY_MESSAGES,
+    MAX_HISTORY_MESSAGE_TOKENS,
+    MAX_HISTORY_TOKENS,
+    MAX_OUTPUT_TOKENS,
+    MIN_CONTEXT_ITEM_TOKENS,
+    MIN_OUTPUT_TOKENS,
+    MODEL_CONTEXT_TOKENS,
+    QDRANT_URL,
+    RAG_API_KEY,
+    RAG_MODEL_ID,
+    RAG_MODEL_NAME,
+    RETRIEVAL_LIMIT,
+    SPARSE_EMBEDDING_MODEL,
+    SPARSE_LANGUAGE,
+    SPARSE_VECTOR_NAME,
+    TOKENIZER_MODEL,
+    WIKI_BASE_URL,
 )
-
-
-# ============================================================
-# МОДЕЛИ ОБЫЧНОГО API
-# ============================================================
-
-class SearchRequest(BaseModel):
-    question: str = Field(
-        min_length=2,
-        max_length=2000,
-    )
-
-    limit: int = Field(
-        default=5,
-        ge=1,
-        le=20,
-    )
-
-
-class SearchResult(BaseModel):
-    score: float
-    title: str
-    heading_path: str
-    text: str
-    source_path: str
-    wiki_url: str
-
-
-class SearchResponse(BaseModel):
-    question: str
-    count: int
-    results: list[SearchResult]
-
-
-class AskRequest(BaseModel):
-    question: str = Field(
-        min_length=2,
-        max_length=2000,
-    )
-
-
-class Source(BaseModel):
-    citation_number: int
-    title: str
-    heading_path: str
-    wiki_url: str
-    score: float
-
-
-class AskResponse(BaseModel):
-    answer: str
-    sources: list[Source]
-
-
-# ============================================================
-# МОДЕЛИ OPENAI-COMPATIBLE API
-# ============================================================
-
-class ChatMessage(BaseModel):
-    model_config = ConfigDict(
-        extra="allow",
-    )
-
-    role: str
-    content: Any = ""
-
-
-class ChatCompletionRequest(BaseModel):
-    # Open WebUI может присылать дополнительные поля:
-    # metadata, chat_id, stream_options и т.д.
-    model_config = ConfigDict(
-        extra="allow",
-    )
-
-    model: str = RAG_MODEL_ID
-    messages: list[ChatMessage]
-    stream: bool = False
-    temperature: float | None = None
-    max_tokens: int | None = None
+from ..core.helpers import (
+    clean_history_message,
+    content_to_text,
+    extract_cited_source_numbers,
+    extract_technical_identifiers,
+    is_follow_up_question,
+    is_no_answer,
+    payload_contains_identifier,
+    sparse_embedding_to_vector,
+    split_stream_text,
+)
+from .schemas import (
+    AskRequest,
+    AskResponse,
+    ChatCompletionRequest,
+    ChatMessage,
+    SearchRequest,
+    SearchResponse,
+    SearchResult,
+    Source,
+)
 
 
 # ============================================================
@@ -386,7 +181,7 @@ app = FastAPI(
         "+ OpenAI-compatible API "
         "для Open WebUI"
     ),
-    version="1.2.0",
+    version=API_VERSION,
     lifespan=lifespan,
 )
 
@@ -429,61 +224,6 @@ def make_wiki_url(
         f"{WIKI_BASE_URL.rstrip('/')}"
         f"/{encoded_path.lstrip('/')}"
     )
-
-
-def content_to_text(
-    content: Any,
-) -> str:
-    """
-    OpenAI messages обычно содержат строку,
-    но некоторые клиенты присылают массив
-    content-блоков.
-    """
-
-    if isinstance(
-        content,
-        str,
-    ):
-        return content.strip()
-
-    if isinstance(
-        content,
-        list,
-    ):
-        parts: list[str] = []
-
-        for item in content:
-            if isinstance(
-                item,
-                dict,
-            ):
-                value = (
-                    item.get("text")
-                    or item.get("content")
-                    or ""
-                )
-
-                if value:
-                    parts.append(
-                        str(value)
-                    )
-
-            elif item:
-                parts.append(
-                    str(item)
-                )
-
-        return "\n".join(
-            parts
-        ).strip()
-
-    if content is None:
-        return ""
-
-    return str(
-        content
-    ).strip()
-
 
 
 def encode_text(
@@ -667,25 +407,6 @@ def count_chat_tokens(
         )
 
 
-def clean_history_message(
-    text: str,
-) -> str:
-    """
-    Не тащим обратно в prompt длинный блок ссылок
-    Open WebUI и служебные хвосты прошлых ответов.
-    """
-
-    text = re.split(
-        r"\n-{3,}\s*\n"
-        r"#{1,6}\s*Источники\b",
-        text,
-        maxsplit=1,
-        flags=re.IGNORECASE,
-    )[0]
-
-    return text.strip()
-
-
 def verify_openai_key(
     authorization: str | None,
 ) -> None:
@@ -702,64 +423,6 @@ def verify_openai_key(
                     "Bearer",
             },
         )
-
-
-def extract_cited_source_numbers(
-    answer: str,
-) -> list[int]:
-    found: set[int] = set()
-
-    blocks = re.findall(
-        r"\[(?:Источник|Источники)\s+"
-        r"([0-9,\s]+)\]",
-        answer,
-        flags=re.IGNORECASE,
-    )
-
-    for block in blocks:
-        for value in re.findall(
-            r"\d+",
-            block,
-        ):
-            found.add(
-                int(value)
-            )
-
-    return sorted(
-        found
-    )
-
-
-def is_no_answer(
-    answer: str,
-) -> bool:
-    """
-    Определяет ответы, в которых модель прямо сообщает,
-    что сведений в документации нет или недостаточно.
-
-    Для таких ответов блок «Источники» не показывается.
-    """
-
-    normalized = (
-        answer
-        .strip()
-        .lower()
-    )
-
-    no_answer_markers = (
-        "в документации не найдено",
-        "в документации недостаточно информации",
-        "в предоставленных источниках не найдено",
-        "в источниках не найдено",
-        "не упоминается в предоставленных источниках",
-        "невозможно дать точный ответ",
-        "недостаточно информации для однозначного ответа",
-    )
-
-    return any(
-        marker in normalized
-        for marker in no_answer_markers
-    )
 
 
 def select_returned_sources(
@@ -944,94 +607,6 @@ def get_last_user_question(
     )
 
 
-def is_follow_up_question(
-    question: str,
-) -> bool:
-    """
-    Определяет зависимые вопросы вроде:
-
-    «Че там?»
-    «А где это?»
-    «Можно подробнее?»
-    «Что дальше?»
-
-    Для самостоятельного вопроса история
-    в generation prompt вообще не добавляется.
-    """
-
-    normalized = (
-        question
-        .strip()
-        .lower()
-    )
-
-    normalized_no_punctuation = (
-        normalized.rstrip(
-            "?!.,:; "
-        )
-    )
-
-    words = (
-        normalized_no_punctuation
-        .split()
-    )
-
-    if len(words) > 12:
-        return False
-
-    exact_follow_ups = {
-        "че там",
-        "чё там",
-        "что там",
-        "ну что",
-        "ну че",
-        "ну чё",
-        "что дальше",
-        "дальше",
-        "продолжай",
-        "подробнее",
-        "можно подробнее",
-        "почему",
-        "где",
-        "как",
-        "и что",
-        "и что дальше",
-    }
-
-    if (
-        normalized_no_punctuation
-        in exact_follow_ups
-    ):
-        return True
-
-    continuation_markers = (
-        "а ",
-        "и ",
-        "но ",
-        "тогда ",
-        "это ",
-        "этот ",
-        "эта ",
-        "эти ",
-        "там ",
-        "тут ",
-        "как это",
-        "где это",
-        "почему так",
-        "что с этим",
-        "а если",
-        "а как",
-        "а где",
-        "а почему",
-        "можешь подробнее",
-        "расскажи подробнее",
-    )
-
-    return normalized.startswith(
-        continuation_markers
-    )
-
-
 def make_retrieval_query(
     messages: list[ChatMessage],
     current_question: str,
@@ -1091,94 +666,6 @@ def make_retrieval_query(
         f"{current_question}"
     )
 
-
-
-def extract_technical_identifiers(
-    question: str,
-) -> list[str]:
-    """
-    Извлекает точные технические идентификаторы:
-
-    CF_LABCOUNTERLINKS_SEARCH
-    LP__HELIX_COMPARE_1
-    AN_HANDLER_BS240_ASTM
-
-    Если пользователь спрашивает конкретный код,
-    а этого кода нет ни в одном найденном чанке,
-    лучше честно вернуть «не найдено», чем подставить
-    семантически похожий, но нерелевантный документ.
-    """
-
-    candidates = re.findall(
-        r"\b[A-Za-z][A-Za-z0-9]*"
-        r"(?:_[A-Za-z0-9]*)+\b",
-        question,
-    )
-
-    return list(
-        dict.fromkeys(
-            candidate.upper()
-            for candidate in candidates
-            if len(candidate) >= 5
-        )
-    )
-
-
-def payload_contains_identifier(
-    payload: dict[str, Any],
-    identifier: str,
-) -> bool:
-    searchable_text = "\n".join(
-        str(
-            payload.get(
-                field,
-                "",
-            )
-        )
-        for field in (
-            "title",
-            "heading_path",
-            "text",
-            "source_path",
-            "absolute_path",
-        )
-    ).upper()
-
-    return (
-        identifier.upper()
-        in searchable_text
-    )
-
-
-def sparse_embedding_to_vector(
-    embedding: Any,
-) -> models.SparseVector:
-    indices = embedding.indices
-    values = embedding.values
-
-    if hasattr(
-        indices,
-        "tolist",
-    ):
-        indices = indices.tolist()
-
-    if hasattr(
-        values,
-        "tolist",
-    ):
-        values = values.tolist()
-
-    return models.SparseVector(
-        indices=[
-            int(item)
-            for item in indices
-        ],
-
-        values=[
-            float(item)
-            for item in values
-        ],
-    )
 
 
 def make_sparse_query_vector(
@@ -2274,21 +1761,6 @@ def format_for_openwebui(
     )
 
 
-def split_stream_text(
-    text: str,
-    chunk_size: int = 48,
-) -> list[str]:
-    return [
-        text[index:
-             index + chunk_size]
-        for index in range(
-            0,
-            len(text),
-            chunk_size,
-        )
-    ]
-
-
 # ============================================================
 # ОБЫЧНЫЕ ENDPOINTS
 # ============================================================
@@ -2300,7 +1772,7 @@ def root() -> dict:
             "Wiki.js Hybrid RAG API",
 
         "version":
-            "1.2.0",
+            API_VERSION,
 
         "docs":
             "/docs",

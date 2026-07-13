@@ -1,3 +1,5 @@
+"""Build a Qdrant index from exported Wiki.js Markdown documents."""
+
 import hashlib
 import os
 import re
@@ -16,12 +18,7 @@ from tqdm import tqdm
 # НАСТРОЙКИ
 # ============================================================
 
-MD_ROOT = Path(
-    os.getenv(
-        "MD_ROOT",
-        "/home/gigimon/project/help/wikijs_export",
-    )
-)
+MD_ROOT = Path(os.getenv("MD_ROOT", "data/wikijs_export")).resolve()
 
 QDRANT_URL = os.getenv(
     "QDRANT_URL",

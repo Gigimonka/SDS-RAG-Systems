@@ -20,7 +20,9 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 
-ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT / "data"
+SOURCE_ROOT = ROOT / "source"
 DEFAULT_EXPORT = ROOT / "wikijs_export"
 
 PROJECTS = [
@@ -29,10 +31,10 @@ PROJECTS = [
         "title": "ИнфоКлиника",
         "path": "infoclinica",
         "asset_path": "infoclinica",
-        "topics": ROOT / "Common_Project26-2" / "Topics",
-        "toc": ROOT / "Common_Project26-2" / "Maps" / "table_of_contents.xml",
-        "images": ROOT / "Common_Project26-2" / "Images",
-        "baggage": ROOT / "Common_Project26-2" / "Baggage",
+        "topics": SOURCE_ROOT  / "Topics",
+        "toc": SOURCE_ROOT  / "Maps" / "table_of_contents.xml",
+        "images": SOURCE_ROOT  / "Images",
+        "baggage": SOURCE_ROOT  / "Baggage",
     },
 ]
 
@@ -261,7 +263,13 @@ def split_internal_href(href: str) -> tuple[str, str]:
 
 def parse_xml(path: Path) -> tuple[ET.Element | None, bool, str | None]:
     """Parse XML, retrying after a non-destructive repair of known bad attrs."""
-    source = path.read_text(encoding="utf-8-sig")
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as error:
+        # A partially copied Help&Manual topic can end in the middle of a
+        # multibyte UTF-8 character. Treat it like any other malformed topic
+        # so one damaged source file does not abort the complete export.
+        return None, False, f"не удалось декодировать UTF-8: {error}"
     try:
         return ET.fromstring(source), False, None
     except ET.ParseError as first_error:

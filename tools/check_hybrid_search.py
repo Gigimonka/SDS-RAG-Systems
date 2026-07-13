@@ -1,3 +1,5 @@
+"""Smoke-test the running hybrid-search API."""
+
 from __future__ import annotations
 
 import json

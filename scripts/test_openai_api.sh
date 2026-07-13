@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-ENV_FILE="/home/gigimon/project/wikijs/.env"
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${PROJECT_ROOT}/.env"
 
 if [[ -f "${ENV_FILE}" ]]; then
   set -a

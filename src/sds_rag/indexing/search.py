@@ -1,3 +1,5 @@
+"""Interactive command-line search against a Qdrant collection."""
+
 import os
 
 import torch

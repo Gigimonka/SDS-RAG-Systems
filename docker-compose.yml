@@ -30,7 +30,7 @@ services:
       - "3000:3000"
 
     volumes:
-    - /home/gigimon/project/help/wikijs_export:/wiki-import  
+      - ./data/wikijs_export:/wiki-import
 
   qdrant:
     image: qdrant/qdrant:latest
