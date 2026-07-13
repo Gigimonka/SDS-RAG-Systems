@@ -1,0 +1,93 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: wiki
+      POSTGRES_USER: wikijs
+      POSTGRES_PASSWORD: change_me_strong_password
+
+    volumes:
+      - wiki_db:/var/lib/postgresql/data
+
+  wiki:
+    image: ghcr.io/requarks/wiki:2
+    restart: unless-stopped
+
+    depends_on:
+      - db
+    
+    environment:
+      DB_TYPE: postgres
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: wikijs
+      DB_PASS: change_me_strong_password
+      DB_NAME: wiki
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+    - /home/gigimon/project/help/wikijs_export:/wiki-import  
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:6333:6333"
+
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.10.1
+    restart: unless-stopped
+
+    ports:
+      - "3001:8080"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+
+      WEBUI_URL: "http://localhost:3001"
+
+      # Open WebUI увидит наш FastAPI
+      # как обычный OpenAI-compatible provider.
+      ENABLE_OPENAI_API: "True"
+      OPENAI_API_BASE_URL: "http://host.docker.internal:8000/v1"
+      OPENAI_API_KEY: "${RAG_API_KEY:-sk-local-rag-change-me}"
+
+      # Чтобы Open WebUI не пытался искать Ollama.
+      ENABLE_OLLAMA_API: "False"
+
+      # Название интерфейса.
+      WEBUI_NAME: "SDS Wiki AI"
+
+      # Обязательно должен быть постоянным,
+      # иначе после пересоздания контейнера
+      # будут сбрасываться сессии.
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY:-change-me-generate-a-random-secret}"
+
+      # Первый зарегистрированный пользователь
+      # станет администратором.
+      WEBUI_AUTH: "True"
+      ENABLE_SIGNUP: "False"
+      DEFAULT_USER_ROLE: "pending"
+
+      # Не записываем каждый отдельный токен в БД.
+      ENABLE_REALTIME_CHAT_SAVE: "False"
+
+      
+
+    volumes:
+      - open_webui_data:/app/backend/data    
+
+volumes:
+  wiki_db:
+  qdrant_storage:
+  open_webui_data:

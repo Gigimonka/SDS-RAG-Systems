@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+.venv-vllm/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# SVN metadata
+.svn/
+
+# Private source documentation
+/help/Common_Project26-2/
+
+# Generated Wiki.js content: около 843 МБ
+/help/wikijs_export/
+/help/wikijs_export-conversion-report.json
+
+# Logs
+*.log
