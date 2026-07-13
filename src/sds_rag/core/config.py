@@ -22,7 +22,7 @@ SPARSE_VECTOR_NAME = os.getenv("SPARSE_VECTOR_NAME", "sparse")
 SPARSE_EMBEDDING_MODEL = os.getenv("SPARSE_EMBEDDING_MODEL", "Qdrant/bm25")
 SPARSE_LANGUAGE = os.getenv("SPARSE_LANGUAGE", "russian")
 HYBRID_PREFETCH_LIMIT = _env_int("HYBRID_PREFETCH_LIMIT", 40)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "ai-forever/FRIDA")
 
 WIKI_BASE_URL = os.getenv("WIKI_BASE_URL", "http://localhost:3000")
 LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:8001/v1")

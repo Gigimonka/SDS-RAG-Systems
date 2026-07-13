@@ -99,11 +99,14 @@ async def lifespan(
         f"{EMBEDDING_MODEL}"
     )
 
-    app.state.embedding_model = (
-        SentenceTransformer(
-            EMBEDDING_MODEL,
-            device=device,
-        )
+    app.state.embedding_model = SentenceTransformer(
+        EMBEDDING_MODEL,
+        device=device,
+        model_kwargs=(
+            {"torch_dtype": torch.float16}
+            if device == "cuda"
+            else {}
+        ),
     )
 
     print(
@@ -177,7 +180,7 @@ app = FastAPI(
     title="Wiki.js Hybrid RAG API",
     description=(
         "Hybrid RAG по документации Wiki.js: "
-        "BGE-M3 dense + BM25 sparse + RRF "
+        "ai-forever/FRIDA dense + BM25 sparse + RRF "
         "+ OpenAI-compatible API "
         "для Open WebUI"
     ),
@@ -697,7 +700,7 @@ def hybrid_query_points(
     """
     Два независимых поиска:
 
-    1. BGE-M3 dense — ищет по смыслу.
+    1. ai-forever/FRIDA dense — ищет по смыслу.
     2. BM25 sparse — ищет точные слова,
        коды, процедуры и идентификаторы.
 
@@ -714,6 +717,7 @@ def hybrid_query_points(
 
     dense_vector = dense_model.encode(
         question,
+        prompt_name="search_query",
         normalize_embeddings=True,
         convert_to_numpy=True,
     )

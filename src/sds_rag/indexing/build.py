@@ -26,19 +26,19 @@ QDRANT_URL = os.getenv(
 )
 
 COLLECTION_NAME = os.getenv(
-    "QDRANT_COLLECTION",
+    "SOURCE_QDRANT_COLLECTION",
     "wikijs_docs",
 )
 
 MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
-    "BAAI/bge-m3",
+    "ai-forever/FRIDA",
 )
 
 
 # Максимальный примерный размер одного чанка.
 # Это количество символов, не токенов.
-MAX_CHUNK_CHARS = 3500
+MAX_CHUNK_CHARS = 1000
 
 # Один предыдущий Markdown-блок будет добавляться
 # в следующий чанк как небольшое перекрытие.
@@ -46,7 +46,7 @@ OVERLAP_BLOCKS = 1
 
 # Начни с 8.
 # На RTX 5070 Ti потом можно попробовать 16 или 32.
-EMBEDDING_BATCH_SIZE = 8
+EMBEDDING_BATCH_SIZE = 64
 
 # Сколько точек отправлять в Qdrant одним запросом.
 QDRANT_BATCH_SIZE = 64
@@ -645,6 +645,11 @@ def main() -> None:
     model = SentenceTransformer(
         MODEL_NAME,
         device=device,
+        model_kwargs=(
+            {"torch_dtype": torch.float16}
+            if device == "cuda"
+            else {}
+        ),
     )
 
     vector_size = (
@@ -748,16 +753,11 @@ def main() -> None:
         ]
 
         embeddings = model.encode(
-
             texts,
-
-            batch_size=
-                EMBEDDING_BATCH_SIZE,
-
+            prompt_name="search_document",
+            batch_size=EMBEDDING_BATCH_SIZE,
             normalize_embeddings=True,
-
             show_progress_bar=False,
-
             convert_to_numpy=True,
         )
 
