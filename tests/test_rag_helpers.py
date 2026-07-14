@@ -64,9 +64,7 @@ class RagHelpersTest(unittest.TestCase):
             "text": "Используется AN_HANDLER_BS240_ASTM.",
         }
 
-        self.assertTrue(
-            payload_contains_identifier(payload, "an_handler_bs240_astm")
-        )
+        self.assertTrue(payload_contains_identifier(payload, "an_handler_bs240_astm"))
         self.assertFalse(payload_contains_identifier(payload, "UNKNOWN_CODE"))
 
     def test_sparse_embedding_conversion_normalizes_number_types(self) -> None:
