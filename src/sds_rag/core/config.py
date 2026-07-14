@@ -6,7 +6,6 @@ import os
 
 from .. import __version__
 
-
 API_VERSION = __version__
 
 

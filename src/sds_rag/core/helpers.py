@@ -13,14 +13,11 @@ from typing import Any
 
 from qdrant_client import models
 
-
 _CITATION_BLOCK_RE = re.compile(
     r"\[(?:Источник|Источники)\s+([0-9,\s]+)\]",
     flags=re.IGNORECASE,
 )
-_TECHNICAL_IDENTIFIER_RE = re.compile(
-    r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]*)+\b"
-)
+_TECHNICAL_IDENTIFIER_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]*)+\b")
 _NO_ANSWER_MARKERS = (
     "в документации не найдено",
     "в документации недостаточно информации",
@@ -180,4 +177,6 @@ def split_stream_text(text: str, chunk_size: int = 48) -> list[str]:
     """Split a completed response into deterministic SSE payload chunks."""
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
-    return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
+    return [
+        text[index : index + chunk_size] for index in range(0, len(text), chunk_size)
+    ]

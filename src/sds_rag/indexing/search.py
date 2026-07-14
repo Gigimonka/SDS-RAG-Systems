@@ -20,12 +20,12 @@ QDRANT_URL = os.getenv(
 
 COLLECTION_NAME = os.getenv(
     "QDRANT_COLLECTION",
-    "wikijs_docs",
+    "wikijs_docs_hybrid",
 )
 
 MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
-    "BAAI/bge-m3",
+    "ai-forever/FRIDA",
 )
 
 
