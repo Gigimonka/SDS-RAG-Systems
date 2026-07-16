@@ -2,8 +2,9 @@
 
 Hybrid RAG-система для поиска и ответов по внутренней документации Wiki.js.
 Dense-поиск ai-forever/FRIDA и sparse-поиск BM25 объединяются в Qdrant через RRF,
-после чего FastAPI передаёт найденный контекст в vLLM. API совместим с OpenAI
-Chat Completions и может использоваться из Open WebUI.
+после чего multilingual cross-encoder повторно ранжирует найденные чанки, а
+FastAPI передаёт лучший контекст в vLLM. API совместим с OpenAI Chat
+Completions и может использоваться из Open WebUI.
 
 ## Структура проекта
 
@@ -110,6 +111,28 @@ uv run python tools/convert_helpman_to_wikijs.py \
    перед запуском API. Эти значения нельзя оставлять равными `change-me`,
    публиковать или добавлять в Git.
 
+   По умолчанию после hybrid retrieval включён реранкер
+   `Qwen/Qwen3-Reranker-0.6B`. Основные параметры:
+
+   ```dotenv
+   RERANK_ENABLED=true
+   RERANKER_MODEL=Qwen/Qwen3-Reranker-0.6B
+   RERANKER_DEVICE=auto
+   RERANK_CANDIDATES=40
+   RERANK_MAX_LENGTH=768
+   RERANK_BATCH_SIZE=4
+   RERANK_FAIL_OPEN=true
+   MAX_CHUNKS_PER_SECTION=2
+   ```
+
+   `RERANKER_DEVICE=auto` выбирает то же устройство, что и dense-модель.
+   Значение `cpu` освобождает видеопамять ценой большей задержки. При
+   `RERANK_FAIL_OPEN=true` единичная ошибка inference не останавливает API:
+   запрос обрабатывается в исходном RRF-порядке, а ошибка записывается в лог.
+   `MAX_CHUNKS_PER_SECTION=2` сохраняет до двух лучших reranked-чанков одного
+   раздела. Они сортируются по `chunk_index`, объединяются в один контекст и
+   используют одну ссылку на источник.
+
    Если секреты были изменены после запуска сервисов, пересоздать Open WebUI:
 
    ```bash
@@ -121,6 +144,21 @@ uv run python tools/convert_helpman_to_wikijs.py \
    существующие пользовательские сессии будут завершены.
 
 2. Установить зависимости основного приложения:
+
+   Для CUDA-реранкера Triton во время первого inference компилирует небольшой
+   Python-модуль. В Ubuntu/WSL для этого нужен заголовок `Python.h`,
+   соответствующий Python основного окружения:
+
+   ```bash
+   sudo apt update
+   sudo apt install python3.14-dev
+   ```
+
+   Без системного dev-пакета API продолжит работу благодаря
+   `RERANK_FAIL_OPEN=true`, но в логе появится ошибка компиляции
+   `fatal error: Python.h: No such file or directory`, а поиск вернётся к
+   исходному RRF-порядку без `rerank_score`. Если устанавливать системный пакет
+   нельзя, используйте `RERANKER_DEVICE=cpu`.
 
    ```bash
    uv sync
@@ -241,9 +279,13 @@ LLM_MODEL=Qwen/Qwen3-8B-AWQ
 ./scripts/start_rag_api.sh
 ```
 
+При первом запуске API также загрузит модель реранкера. Dense encoder и
+cross-encoder вызываются последовательно, чтобы конкурентные запросы не
+создавали несколько одновременных GPU inference.
+
 Если vLLM сообщает о нехватке видеопамяти, сначала уменьшить
-`--max-model-len` до `8192`. При необходимости также уменьшить
-`--gpu-memory-utilization` до `0.65`.
+`--gpu-memory-utilization`. При необходимости уменьшить `--max-model-len` до
+`8192` или установить `RERANKER_DEVICE=cpu`.
 
 ## Проверки
 
@@ -255,6 +297,12 @@ uv run python tools/check_hybrid_search.py
 
 Последние две команды требуют запущенного API и Qdrant. Полный список
 настроек RAG находится в `src/sds_rag/core/config.py`.
+
+Endpoint `/search` возвращает итоговый `score`, исходный `retrieval_score`
+после RRF и `rerank_score`. Значение `rerank_score` является logit модели для
+сортировки кандидатов, а не калиброванной вероятностью правильного ответа.
+Поля `chunk_count` и `chunk_indices` показывают, сколько чанков раздела было
+объединено и в каком порядке они находились в исходном документе.
 
 ## Безопасность
 

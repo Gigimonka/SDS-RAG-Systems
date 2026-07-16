@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer
 
 from ..core.config import (
@@ -26,6 +26,7 @@ from ..core.config import (
     HYBRID_PREFETCH_LIMIT,
     LLM_MODEL,
     LLM_URL,
+    MAX_CHUNKS_PER_SECTION,
     MAX_CONTEXT_ITEM_TOKENS,
     MAX_CONTEXTS,
     MAX_HISTORY_MESSAGES,
@@ -39,6 +40,13 @@ from ..core.config import (
     RAG_API_KEY,
     RAG_MODEL_ID,
     RAG_MODEL_NAME,
+    RERANK_BATCH_SIZE,
+    RERANK_CANDIDATES,
+    RERANK_ENABLED,
+    RERANK_FAIL_OPEN,
+    RERANK_MAX_LENGTH,
+    RERANKER_DEVICE,
+    RERANKER_MODEL,
     RETRIEVAL_LIMIT,
     SPARSE_EMBEDDING_MODEL,
     SPARSE_LANGUAGE,
@@ -56,6 +64,17 @@ from ..core.helpers import (
     payload_contains_identifier,
     sparse_embedding_to_vector,
     split_stream_text,
+)
+from ..core.reranking import (
+    RankedPoint,
+    RankedSection,
+    group_ranked_sections,
+    merge_ranked_section_text,
+    merge_unique_points,
+    rank_by_retrieval_score,
+    rerank_points,
+    section_points_in_document_order,
+    select_identifier_points,
 )
 from .schemas import (
     AskRequest,
@@ -93,6 +112,42 @@ async def lifespan(
         EMBEDDING_MODEL,
         device=device,
     )
+
+    app.state.reranker = None
+    app.state.reranker_device = None
+
+    if MAX_CHUNKS_PER_SECTION <= 0:
+        raise RuntimeError(
+            "MAX_CHUNKS_PER_SECTION должен быть положительным"
+        )
+
+    if RERANK_ENABLED:
+        if RERANK_BATCH_SIZE <= 0:
+            raise RuntimeError("RERANK_BATCH_SIZE должен быть положительным")
+
+        if RERANK_CANDIDATES <= 0:
+            raise RuntimeError("RERANK_CANDIDATES должен быть положительным")
+
+        if RERANK_MAX_LENGTH <= 0:
+            raise RuntimeError("RERANK_MAX_LENGTH должен быть положительным")
+
+        reranker_device = (
+            device
+            if RERANKER_DEVICE.strip().lower() == "auto"
+            else RERANKER_DEVICE
+        )
+        app.state.reranker_device = reranker_device
+
+        print(
+            "Загрузка reranker-модели: "
+            f"{RERANKER_MODEL} ({reranker_device})"
+        )
+
+        app.state.reranker = CrossEncoder(
+            RERANKER_MODEL,
+            device=reranker_device,
+            max_length=RERANK_MAX_LENGTH,
+        )
 
     print(f"Загрузка токенизатора LLM: " f"{TOKENIZER_MODEL}")
 
@@ -133,6 +188,10 @@ async def lifespan(
             "Hybrid-коллекция Qdrant " f"'{COLLECTION_NAME}' " "не найдена"
         )
 
+    # Dense encoder and cross-encoder share model state and often one GPU.
+    # Serialize retrieval inference, but run it outside the event loop.
+    app.state.retrieval_lock = asyncio.Lock()
+
     print("Wiki.js Hybrid RAG API запущен")
 
     yield
@@ -147,6 +206,7 @@ app = FastAPI(
     description=(
         "Hybrid RAG по документации Wiki.js: "
         "ai-forever/FRIDA dense + BM25 sparse + RRF "
+        "+ multilingual cross-encoder reranker "
         "+ OpenAI-compatible API "
         "для Open WebUI"
     ),
@@ -311,7 +371,7 @@ def count_chat_tokens(
         ):
             return len(tokenized[0])
 
-        return len(tokenized)
+        return len(tokenized["input_ids"])
 
     except Exception:
         # Консервативный fallback для нестандартного
@@ -560,54 +620,165 @@ def hybrid_query_points(
     )
 
 
-def retrieve_context(
+def collect_candidate_points(
     question: str,
+    *,
+    limit: int,
+) -> list:
+    """Collect hybrid candidates and protect exact technical identifiers."""
+    response = hybrid_query_points(
+        question=question,
+        limit=limit,
+    )
+    points = list(response.points)
+    technical_identifiers = extract_technical_identifiers(question)
+
+    if not technical_identifiers:
+        return points
+
+    point_groups = [points]
+
+    # A question may compare identifiers stored in different chunks.  Query a
+    # missing identifier separately instead of requiring every code to occur in
+    # one payload and incorrectly returning an empty result.
+    for identifier in technical_identifiers:
+        identifier_found = any(
+            payload_contains_identifier(
+                point.payload or {},
+                identifier,
+            )
+            for point in points
+        )
+
+        if identifier_found:
+            continue
+
+        identifier_response = hybrid_query_points(
+            question=identifier,
+            limit=limit,
+        )
+        point_groups.append(list(identifier_response.points))
+
+    merged_points = merge_unique_points(*point_groups)
+
+    # Exact identifiers are a hard constraint: unrelated semantic matches must
+    # not be passed to either the reranker or the answer model.
+    return select_identifier_points(
+        merged_points,
+        technical_identifiers,
+        limit=limit,
+    )
+
+
+def rank_candidate_points(
+    question: str,
+    points: list,
+) -> list[RankedPoint]:
+    """Apply the configured cross-encoder with an explicit RRF fallback."""
+    if not RERANK_ENABLED:
+        return rank_by_retrieval_score(points)
+
+    reranker = app.state.reranker
+
+    if reranker is None:
+        raise RuntimeError("Реранкер включён, но модель не загружена")
+
+    try:
+        return rerank_points(
+            question,
+            points,
+            reranker,
+            batch_size=RERANK_BATCH_SIZE,
+        )
+
+    except Exception as exc:
+        if not RERANK_FAIL_OPEN:
+            raise
+
+        print(
+            "Ошибка реранкера, используется исходный RRF-порядок: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return rank_by_retrieval_score(points)
+
+
+def retrieve_ranked_sections(
+    question: str,
+    *,
+    limit: int,
+) -> list[RankedSection]:
+    """Run the complete retrieval pipeline before context formatting."""
+    candidate_limit = max(
+        limit,
+        RERANK_CANDIDATES if RERANK_ENABLED else limit,
+    )
+    points = collect_candidate_points(
+        question,
+        limit=candidate_limit,
+    )
+
+    if not points:
+        return []
+
+    ranked_points = rank_candidate_points(
+        question,
+        points,
+    )
+
+    # The best chunk determines the section rank. Additional high-ranked
+    # chunks restore information that strict one-chunk deduplication lost.
+    return group_ranked_sections(
+        ranked_points,
+        limit=limit,
+        max_chunks_per_section=MAX_CHUNKS_PER_SECTION,
+    )
+
+
+async def retrieve_ranked_sections_async(
+    question: str,
+    *,
+    limit: int,
+) -> list[RankedSection]:
+    """Keep blocking model inference away from the FastAPI event loop."""
+    async with app.state.retrieval_lock:
+        return await asyncio.to_thread(
+            retrieve_ranked_sections,
+            question,
+            limit=limit,
+        )
+
+
+def get_section_chunk_indices(
+    ranked_section: RankedSection,
+) -> list[int]:
+    """Return selected chunk indices in source-document order."""
+    indices: list[int] = []
+
+    for ranked_point in section_points_in_document_order(ranked_section):
+        value = (ranked_point.point.payload or {}).get("chunk_index")
+
+        try:
+            if value is not None:
+                indices.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    return indices
+
+
+def make_context_from_ranked_sections(
+    ranked_sections: list[RankedSection],
 ) -> tuple[
     list[str],
     list[Source],
 ]:
-    response = hybrid_query_points(
-        question=question,
-        limit=RETRIEVAL_LIMIT,
-    )
-
-    points = response.points
-
-    if not points:
-        return [], []
-
-    technical_identifiers = extract_technical_identifiers(question)
-
-    if technical_identifiers:
-        matching_points = []
-
-        for point in points:
-            payload = point.payload or {}
-
-            if all(
-                payload_contains_identifier(
-                    payload,
-                    identifier,
-                )
-                for identifier in technical_identifiers
-            ):
-                matching_points.append(point)
-
-        # Для точного технического кода не используем
-        # случайные семантически похожие документы.
-        if not matching_points:
-            return [], []
-
-        points = matching_points
-
+    """Number final candidates and convert them into LLM context blocks."""
     contexts: list[str] = []
     sources: list[Source] = []
 
-    used_sections: set[tuple[str, str]] = set()
-
-    for point in points:
-        current_score = float(point.score)
-
+    for ranked_section in ranked_sections:
+        ranked_point = ranked_section.primary
+        point = ranked_point.point
         payload = point.payload or {}
 
         title = str(
@@ -624,12 +795,7 @@ def retrieve_context(
             )
         )
 
-        text = str(
-            payload.get(
-                "text",
-                "",
-            )
-        )
+        text = merge_ranked_section_text(ranked_section)
 
         source_path = str(
             payload.get(
@@ -637,16 +803,6 @@ def retrieve_context(
                 "",
             )
         )
-
-        section_key = (
-            source_path,
-            heading_path,
-        )
-
-        if section_key in used_sections:
-            continue
-
-        used_sections.add(section_key)
 
         source_number = len(contexts) + 1
 
@@ -670,19 +826,43 @@ def retrieve_context(
                 heading_path=heading_path,
                 wiki_url=make_wiki_url(source_path),
                 score=round(
-                    current_score,
+                    ranked_point.score,
                     5,
                 ),
+                retrieval_score=round(
+                    ranked_point.retrieval_score,
+                    5,
+                ),
+                rerank_score=(
+                    round(
+                        ranked_point.rerank_score,
+                        5,
+                    )
+                    if ranked_point.rerank_score is not None
+                    else None
+                ),
+                chunk_count=len(ranked_section.ranked_points),
+                chunk_indices=get_section_chunk_indices(ranked_section),
             )
         )
-
-        if len(contexts) >= RETRIEVAL_LIMIT:
-            break
 
     return (
         contexts,
         sources,
     )
+
+
+async def retrieve_context_async(
+    question: str,
+) -> tuple[
+    list[str],
+    list[Source],
+]:
+    ranked_sections = await retrieve_ranked_sections_async(
+        question,
+        limit=RETRIEVAL_LIMIT,
+    )
+    return make_context_from_ranked_sections(ranked_sections)
 
 
 SYSTEM_PROMPT = """
@@ -709,8 +889,16 @@ SYSTEM_PROMPT = """
 
 Отвечай по-русски.
 
-Для простого вопроса дай краткий ответ
-в 2–4 абзацах.
+Давай подробный и содержательный ответ.
+
+Раскрывай все сведения, которые относятся к вопросу
+и подтверждаются источниками: основное правило,
+условия применения, последовательность действий,
+ограничения, исключения и важные примечания.
+
+Не ограничивай ответ фиксированным количеством абзацев.
+При этом не повторяй одну и ту же информацию
+и не пересказывай нерелевантные части документации.
 
 Для инструкции используй
 понятные нумерованные шаги.
@@ -1295,11 +1483,20 @@ def health() -> dict:
         "status": "ok",
         "collection": COLLECTION_NAME,
         "points_count": collection.points_count,
-        "retrieval": "hybrid_rrf",
+        "retrieval": (
+            "hybrid_rrf_rerank"
+            if RERANK_ENABLED
+            else "hybrid_rrf"
+        ),
         "dense_embedding_model": EMBEDDING_MODEL,
         "sparse_embedding_model": SPARSE_EMBEDDING_MODEL,
         "dense_vector_name": DENSE_VECTOR_NAME,
         "sparse_vector_name": SPARSE_VECTOR_NAME,
+        "rerank_enabled": RERANK_ENABLED,
+        "reranker_model": RERANKER_MODEL if RERANK_ENABLED else None,
+        "reranker_device": app.state.reranker_device,
+        "rerank_candidates": RERANK_CANDIDATES if RERANK_ENABLED else None,
+        "rerank_max_length": RERANK_MAX_LENGTH if RERANK_ENABLED else None,
         "llm_model": LLM_MODEL,
         "openwebui_model": RAG_MODEL_ID,
         "context_management": "token_budget",
@@ -1307,6 +1504,7 @@ def health() -> dict:
         "safety_margin_tokens": CONTEXT_SAFETY_MARGIN_TOKENS,
         "max_history_tokens": MAX_HISTORY_TOKENS,
         "max_context_item_tokens": MAX_CONTEXT_ITEM_TOKENS,
+        "max_chunks_per_section": MAX_CHUNKS_PER_SECTION,
     }
 
 
@@ -1314,17 +1512,19 @@ def health() -> dict:
     "/search",
     response_model=SearchResponse,
 )
-def search(
+async def search(
     request: SearchRequest,
 ) -> SearchResponse:
-    response = hybrid_query_points(
-        question=request.question,
+    ranked_sections = await retrieve_ranked_sections_async(
+        request.question,
         limit=request.limit,
     )
 
     results: list[SearchResult] = []
 
-    for point in response.points:
+    for ranked_section in ranked_sections:
+        ranked_point = ranked_section.primary
+        point = ranked_point.point
         payload = point.payload or {}
 
         source_path = str(
@@ -1337,8 +1537,20 @@ def search(
         results.append(
             SearchResult(
                 score=round(
-                    float(point.score),
+                    ranked_point.score,
                     5,
+                ),
+                retrieval_score=round(
+                    ranked_point.retrieval_score,
+                    5,
+                ),
+                rerank_score=(
+                    round(
+                        ranked_point.rerank_score,
+                        5,
+                    )
+                    if ranked_point.rerank_score is not None
+                    else None
                 ),
                 title=str(
                     payload.get(
@@ -1352,14 +1564,11 @@ def search(
                         "",
                     )
                 ),
-                text=str(
-                    payload.get(
-                        "text",
-                        "",
-                    )
-                ),
+                text=merge_ranked_section_text(ranked_section),
                 source_path=source_path,
                 wiki_url=make_wiki_url(source_path),
+                chunk_count=len(ranked_section.ranked_points),
+                chunk_indices=get_section_chunk_indices(ranked_section),
             )
         )
 
@@ -1377,7 +1586,7 @@ def search(
 async def ask(
     request: AskRequest,
 ) -> AskResponse:
-    contexts, sources = retrieve_context(request.question)
+    contexts, sources = await retrieve_context_async(request.question)
 
     (
         answer,
@@ -1436,13 +1645,9 @@ async def openai_chat_completions(
         question,
     )
 
-    contexts, sources = retrieve_context(retrieval_query)
+    contexts, sources = await retrieve_context_async(retrieval_query)
 
-    history_text = (
-        make_history_text(request.messages[:-1])
-        if is_follow_up_question(question)
-        else ""
-    )
+    history_text = make_history_text(request.messages[:-1])
 
     (
         answer,

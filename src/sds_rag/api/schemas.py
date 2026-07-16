@@ -15,12 +15,17 @@ class SearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
+    # Final score: reranker logit when reranking is enabled, otherwise RRF.
     score: float
+    retrieval_score: float
+    rerank_score: float | None = None
     title: str
     heading_path: str
     text: str
     source_path: str
     wiki_url: str
+    chunk_count: int = 1
+    chunk_indices: list[int] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):
@@ -38,7 +43,12 @@ class Source(BaseModel):
     title: str
     heading_path: str
     wiki_url: str
+    # Final score: reranker logit when reranking is enabled, otherwise RRF.
     score: float
+    retrieval_score: float
+    rerank_score: float | None = None
+    chunk_count: int = 1
+    chunk_indices: list[int] = Field(default_factory=list)
 
 
 class AskResponse(BaseModel):
