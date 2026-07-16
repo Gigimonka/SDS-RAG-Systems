@@ -5,14 +5,13 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Protocol
 
 import torch
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
-
 
 # ============================================================
 # НАСТРОЙКИ
@@ -32,34 +31,56 @@ COLLECTION_NAME = os.getenv(
 
 MODEL_NAME = os.getenv(
     "EMBEDDING_MODEL",
-    "BAAI/bge-m3",
+    "ai-forever/FRIDA",
 )
 
 
-# Максимальный примерный размер одного чанка.
-# Это количество символов, не токенов.
-MAX_CHUNK_CHARS = 3500
+# Целевой размер содержимого чанка в токенах embedding-модели.
+# Остаток окна модели резервируется под название документа,
+# путь раздела и специальные токены.
+MAX_CHUNK_TOKENS = 288
 
-# Один предыдущий Markdown-блок будет добавляться
-# в следующий чанк как небольшое перекрытие.
-OVERLAP_BLOCKS = 1
+# Размер перекрытия между соседними чанками в токенах.
+OVERLAP_TOKENS = 48
+
+# Дополнительный запас на границе служебного текста и чанка.
+TOKEN_SAFETY_MARGIN = 8
 
 # Начни с 8.
 # На RTX 5070 Ti потом можно попробовать 16 или 32.
-EMBEDDING_BATCH_SIZE = 8
+EMBEDDING_BATCH_SIZE = 32
 
 # Сколько точек отправлять в Qdrant одним запросом.
 QDRANT_BATCH_SIZE = 64
 
 
-HEADING_RE = re.compile(
-    r"^(#{1,6})\s+(.+?)\s*$"
-)
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+class TextTokenizer(Protocol):
+    """Минимальный интерфейс токенизатора для разбиения документов."""
+
+    def encode(
+        self,
+        text: str,
+        *,
+        add_special_tokens: bool,
+        verbose: bool,
+    ) -> list[int]: ...
+
+    def decode(
+        self,
+        token_ids: list[int],
+        *,
+        skip_special_tokens: bool,
+        clean_up_tokenization_spaces: bool,
+    ) -> str: ...
 
 
 # ============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
+
 
 def remove_frontmatter(text: str) -> str:
     """
@@ -78,7 +99,7 @@ def remove_frontmatter(text: str) -> str:
 
     for index in range(1, len(lines)):
         if lines[index].strip() == "---":
-            return "\n".join(lines[index + 1:])
+            return "\n".join(lines[index + 1 :])
 
     return text
 
@@ -130,10 +151,7 @@ def split_markdown_blocks(
 
         stripped = line.strip()
 
-        if (
-            stripped.startswith("```")
-            or stripped.startswith("~~~")
-        ):
+        if stripped.startswith("```") or stripped.startswith("~~~"):
             marker = stripped[:3]
 
             if not in_code:
@@ -152,9 +170,7 @@ def split_markdown_blocks(
 
             if current:
 
-                block = "\n".join(
-                    current
-                ).strip()
+                block = "\n".join(current).strip()
 
                 if block:
                     blocks.append(block)
@@ -167,9 +183,7 @@ def split_markdown_blocks(
 
     if current:
 
-        block = "\n".join(
-            current
-        ).strip()
+        block = "\n".join(current).strip()
 
         if block:
             blocks.append(block)
@@ -177,9 +191,58 @@ def split_markdown_blocks(
     return blocks
 
 
+def count_tokens(
+    text: str,
+    tokenizer: TextTokenizer,
+    *,
+    add_special_tokens: bool = False,
+) -> int:
+    """Считает токены тем же токенизатором, который использует bi-encoder."""
+
+    return len(
+        tokenizer.encode(
+            text,
+            add_special_tokens=add_special_tokens,
+            verbose=False,
+        )
+    )
+
+
+def split_by_token_limit(
+    text: str,
+    tokenizer: TextTokenizer,
+    max_tokens: int,
+) -> list[str]:
+    """Жёстко делит текст, если одно предложение не помещается целиком."""
+
+    if max_tokens <= 0:
+        raise ValueError("max_tokens должен быть положительным")
+
+    token_ids = tokenizer.encode(
+        text,
+        add_special_tokens=False,
+        verbose=False,
+    )
+
+    parts: list[str] = []
+
+    for start in range(0, len(token_ids), max_tokens):
+        part = tokenizer.decode(
+            token_ids[start : start + max_tokens],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        ).strip()
+
+        if part:
+            parts.append(part)
+
+    return parts
+
+
 def split_long_text(
     text: str,
-    max_chars: int,
+    tokenizer: TextTokenizer,
+    max_tokens: int,
 ) -> list[str]:
     """
     Запасной вариант для очень длинного абзаца.
@@ -187,7 +250,7 @@ def split_long_text(
     Старается делить по предложениям.
     """
 
-    if len(text) <= max_chars:
+    if count_tokens(text, tokenizer) <= max_tokens:
         return [text]
 
     sentences = re.split(
@@ -199,108 +262,127 @@ def split_long_text(
 
     current: list[str] = []
 
-    current_size = 0
-
     for sentence in sentences:
 
-        if (
-            current
-            and current_size + len(sentence) > max_chars
-        ):
+        sentence_tokens = count_tokens(sentence, tokenizer)
 
-            parts.append(
-                " ".join(current).strip()
+        if sentence_tokens > max_tokens:
+
+            if current:
+                parts.append(" ".join(current).strip())
+                current = []
+
+            parts.extend(
+                split_by_token_limit(
+                    sentence,
+                    tokenizer,
+                    max_tokens,
+                )
             )
+
+            continue
+
+        candidate = " ".join(current + [sentence])
+
+        if current and count_tokens(candidate, tokenizer) > max_tokens:
+
+            parts.append(" ".join(current).strip())
 
             current = []
 
-            current_size = 0
-
         current.append(sentence)
-
-        current_size += len(sentence) + 1
 
     if current:
 
-        parts.append(
-            " ".join(current).strip()
-        )
+        parts.append(" ".join(current).strip())
 
-    return [
-        part
-        for part in parts
-        if part
-    ]
+    return [part for part in parts if part]
 
 
 def pack_blocks(
     blocks: list[str],
-    max_chars: int,
+    tokenizer: TextTokenizer,
+    max_tokens: int,
+    overlap_tokens: int,
 ) -> list[str]:
     """
     Объединяет маленькие Markdown-блоки
-    в чанки примерно до max_chars.
+    в чанки до max_tokens с ограниченным токенным перекрытием.
     """
+
+    if max_tokens <= 0:
+        raise ValueError("max_tokens должен быть положительным")
+
+    if overlap_tokens < 0:
+        raise ValueError("overlap_tokens не может быть отрицательным")
+
+    if overlap_tokens >= max_tokens:
+        raise ValueError("overlap_tokens должен быть меньше max_tokens")
 
     prepared_blocks: list[str] = []
 
     for block in blocks:
 
-        if len(block) > max_chars:
-
-            prepared_blocks.extend(
-                split_long_text(
-                    block,
-                    max_chars,
-                )
+        prepared_blocks.extend(
+            split_long_text(
+                block,
+                tokenizer,
+                max_tokens,
             )
-
-        else:
-
-            prepared_blocks.append(
-                block
-            )
+        )
 
     chunks: list[str] = []
 
-    current: list[str] = []
+    current = ""
 
     for block in prepared_blocks:
 
-        candidate = "\n\n".join(
-            current + [block]
-        )
+        candidate = f"{current}\n\n{block}".strip() if current else block
 
-        if (
-            current
-            and len(candidate) > max_chars
-        ):
+        if current and count_tokens(candidate, tokenizer) > max_tokens:
 
-            chunks.append(
-                "\n\n".join(
-                    current
+            chunks.append(current)
+
+            if overlap_tokens > 0:
+                current_ids = tokenizer.encode(
+                    current,
+                    add_special_tokens=False,
+                    verbose=False,
+                )
+                block_tokens = count_tokens(block, tokenizer)
+                overlap_budget = min(
+                    overlap_tokens,
+                    max(0, max_tokens - block_tokens),
+                )
+                overlap = tokenizer.decode(
+                    current_ids[-overlap_budget:] if overlap_budget else [],
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
                 ).strip()
-            )
+            else:
+                overlap = ""
 
-            current = (
-                current[-OVERLAP_BLOCKS:]
-                if OVERLAP_BLOCKS > 0
-                else []
-            )
+            candidate = f"{overlap}\n\n{block}".strip() if overlap else block
 
-        current.append(block)
+            while overlap and count_tokens(candidate, tokenizer) > max_tokens:
+                overlap_ids = tokenizer.encode(
+                    overlap,
+                    add_special_tokens=False,
+                    verbose=False,
+                )
+                overflow = count_tokens(candidate, tokenizer) - max_tokens
+                overlap_ids = overlap_ids[max(1, overflow) :]
+                overlap = tokenizer.decode(
+                    overlap_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                ).strip()
+                candidate = f"{overlap}\n\n{block}".strip() if overlap else block
+
+        current = candidate
 
     if current:
-
-        final_text = "\n\n".join(
-            current
-        ).strip()
-
-        if final_text:
-
-            chunks.append(
-                final_text
-            )
+        chunks.append(current)
 
     return chunks
 
@@ -319,21 +401,18 @@ def first_h1(
         if not match:
             continue
 
-        level = len(
-            match.group(1)
-        )
+        level = len(match.group(1))
 
         if level == 1:
 
-            return clean_heading(
-                match.group(2)
-            )
+            return clean_heading(match.group(2))
 
     return None
 
 
 def split_into_sections(
     text: str,
+    tokenizer: TextTokenizer,
 ) -> list[dict]:
     """
     Делит Markdown по заголовкам.
@@ -357,9 +436,7 @@ def split_into_sections(
 
         nonlocal current_lines
 
-        section_text = "\n".join(
-            current_lines
-        ).strip()
+        section_text = "\n".join(current_lines).strip()
 
         if not section_text:
 
@@ -367,23 +444,20 @@ def split_into_sections(
 
             return
 
-        blocks = split_markdown_blocks(
-            section_text
-        )
+        blocks = split_markdown_blocks(section_text)
 
         chunks = pack_blocks(
             blocks,
-            MAX_CHUNK_CHARS,
+            tokenizer,
+            MAX_CHUNK_TOKENS,
+            OVERLAP_TOKENS,
         )
 
         for chunk in chunks:
 
             sections.append(
                 {
-                    "heading_path": (
-                        current_heading_path
-                        or "Начало документа"
-                    ),
+                    "heading_path": (current_heading_path or "Начало документа"),
                     "text": chunk,
                 }
             )
@@ -392,9 +466,7 @@ def split_into_sections(
 
     for line in text.splitlines():
 
-        heading_match = HEADING_RE.match(
-            line
-        )
+        heading_match = HEADING_RE.match(line)
 
         if not heading_match:
 
@@ -404,27 +476,15 @@ def split_into_sections(
 
         flush_section()
 
-        level = len(
-            heading_match.group(1)
-        )
+        level = len(heading_match.group(1))
 
-        heading = clean_heading(
-            heading_match.group(2)
-        )
+        heading = clean_heading(heading_match.group(2))
 
-        heading_stack[:] = (
-            heading_stack[:level - 1]
-        )
+        heading_stack[:] = heading_stack[: level - 1]
 
-        heading_stack.append(
-            heading
-        )
+        heading_stack.append(heading)
 
-        current_heading_path = (
-            " → ".join(
-                heading_stack
-            )
-        )
+        current_heading_path = " → ".join(heading_stack)
 
     flush_section()
 
@@ -438,11 +498,7 @@ def make_content_hash(
     Хеш содержимого.
     """
 
-    return hashlib.sha256(
-        text.encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def create_point_id(
@@ -454,11 +510,7 @@ def create_point_id(
     Создаёт стабильный UUID.
     """
 
-    value = (
-        f"{relative_path}:"
-        f"{chunk_index}:"
-        f"{chunk_hash}"
-    )
+    value = f"{relative_path}:" f"{chunk_index}:" f"{chunk_hash}"
 
     return str(
         uuid.uuid5(
@@ -472,22 +524,19 @@ def create_point_id(
 # ЧТЕНИЕ MARKDOWN
 # ============================================================
 
-def load_documents() -> list[dict]:
 
-    markdown_files = sorted(
-        MD_ROOT.rglob("*.md")
-    )
+def load_documents(
+    tokenizer: TextTokenizer,
+    max_sequence_tokens: int,
+) -> list[dict]:
+
+    markdown_files = sorted(MD_ROOT.rglob("*.md"))
 
     if not markdown_files:
 
-        raise RuntimeError(
-            f"В {MD_ROOT} не найдено MD-файлов"
-        )
+        raise RuntimeError(f"В {MD_ROOT} не найдено MD-файлов")
 
-    print(
-        f"Найдено MD-файлов: "
-        f"{len(markdown_files)}"
-    )
+    print(f"Найдено MD-файлов: " f"{len(markdown_files)}")
 
     documents: list[dict] = []
 
@@ -509,95 +558,99 @@ def load_documents() -> list[dict]:
                 errors="replace",
             )
 
-        text = remove_frontmatter(
-            raw_text
-        )
+        text = remove_frontmatter(raw_text)
 
-        relative_path = str(
-            md_path.relative_to(
-                MD_ROOT
-            )
-        )
+        relative_path = str(md_path.relative_to(MD_ROOT))
 
-        title = (
-            first_h1(text)
-            or md_path.stem
-        )
+        title = first_h1(text) or md_path.stem
 
         sections = split_into_sections(
-            text
+            text,
+            tokenizer,
         )
 
-        for chunk_index, section in enumerate(
-            sections
-        ):
+        chunk_index = 0
 
-            chunk_text = (
-                section["text"]
-            ).strip()
+        for section in sections:
+
+            chunk_text = (section["text"]).strip()
 
             if len(chunk_text) < 30:
                 continue
 
-            heading_path = (
-                section["heading_path"]
+            heading_path = section["heading_path"]
+
+            embedding_prefix = f"Документ: {title}\n" f"Раздел: {heading_path}\n\n"
+
+            prefix_tokens = count_tokens(
+                embedding_prefix,
+                tokenizer,
+                add_special_tokens=True,
             )
 
-            # Именно этот текст отправляется
-            # embedding-модели.
-            #
-            # Заголовок документа и путь раздела
-            # очень важны для качества поиска.
-            embedding_text = (
-                f"Документ: {title}\n"
-                f"Раздел: {heading_path}\n\n"
-                f"{chunk_text}"
+            available_tokens = min(
+                MAX_CHUNK_TOKENS,
+                max_sequence_tokens - prefix_tokens - TOKEN_SAFETY_MARGIN,
             )
 
-            chunk_hash = make_content_hash(
-                embedding_text
+            if available_tokens <= 0:
+                raise RuntimeError(
+                    "Название документа и путь раздела не помещаются "
+                    f"в окно embedding-модели: {relative_path} / {heading_path}"
+                )
+
+            chunk_parts = split_long_text(
+                chunk_text,
+                tokenizer,
+                available_tokens,
             )
 
-            point_id = create_point_id(
-                relative_path,
-                chunk_index,
-                chunk_hash,
-            )
+            for chunk_part in chunk_parts:
 
-            documents.append(
-                {
-                    "id": point_id,
+                # Именно этот текст отправляется embedding-модели.
+                # Заголовок документа и путь раздела учитываются
+                # в общем токенном лимите.
+                embedding_text = f"{embedding_prefix}{chunk_part}"
 
-                    "embedding_text":
-                        embedding_text,
+                embedding_tokens = count_tokens(
+                    embedding_text,
+                    tokenizer,
+                    add_special_tokens=True,
+                )
 
-                    "payload": {
-                        "title":
-                            title,
+                if embedding_tokens > max_sequence_tokens:
+                    raise RuntimeError(
+                        "Чанк превышает окно embedding-модели: "
+                        f"{embedding_tokens} > {max_sequence_tokens}, "
+                        f"{relative_path} / {heading_path}"
+                    )
 
-                        "heading_path":
-                            heading_path,
+                chunk_hash = make_content_hash(embedding_text)
 
-                        "text":
-                            chunk_text,
+                point_id = create_point_id(
+                    relative_path,
+                    chunk_index,
+                    chunk_hash,
+                )
 
-                        "source_path":
-                            relative_path,
+                documents.append(
+                    {
+                        "id": point_id,
+                        "embedding_text": embedding_text,
+                        "payload": {
+                            "title": title,
+                            "heading_path": heading_path,
+                            "text": chunk_part,
+                            "source_path": relative_path,
+                            "absolute_path": str(md_path),
+                            "chunk_index": chunk_index,
+                            "content_hash": chunk_hash,
+                            "embedding_model": MODEL_NAME,
+                        },
+                    }
+                )
 
-                        "absolute_path":
-                            str(md_path),
-
-                        "chunk_index":
-                            chunk_index,
-
-                        "content_hash":
-                            chunk_hash,
-
-                        "embedding_model":
-                            MODEL_NAME,
-                    },
-                }
-            )
+                chunk_index += 1
 
     return documents
 
@@ -606,29 +659,18 @@ def load_documents() -> list[dict]:
 # СОЗДАНИЕ ЭМБЕДДИНГОВ
 # ============================================================
 
+
 def main() -> None:
 
-    print(
-        f"Папка с Markdown:\n"
-        f"{MD_ROOT}\n"
-    )
+    print(f"Папка с Markdown:\n" f"{MD_ROOT}\n")
 
     if not MD_ROOT.exists():
 
-        raise RuntimeError(
-            f"Папка не существует: "
-            f"{MD_ROOT}"
-        )
+        raise RuntimeError(f"Папка не существует: " f"{MD_ROOT}")
 
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(
-        f"Устройство: {device}"
-    )
+    print(f"Устройство: {device}")
 
     if device == "cuda":
 
@@ -637,55 +679,47 @@ def main() -> None:
             torch.cuda.get_device_name(0),
         )
 
-    print(
-        f"\nЗагрузка модели:\n"
-        f"{MODEL_NAME}\n"
-    )
+    print(f"\nЗагрузка модели:\n" f"{MODEL_NAME}\n")
 
     model = SentenceTransformer(
         MODEL_NAME,
         device=device,
     )
 
-    vector_size = (
-        model
-        .get_sentence_embedding_dimension()
-    )
+    vector_size = model.get_sentence_embedding_dimension()
 
     if vector_size is None:
 
-        raise RuntimeError(
-            "Не удалось определить "
-            "размер эмбеддинга"
-        )
+        raise RuntimeError("Не удалось определить " "размер эмбеддинга")
 
-    print(
-        f"Размер эмбеддинга: "
-        f"{vector_size}"
+    print(f"Размер эмбеддинга: " f"{vector_size}")
+
+    max_sequence_tokens = model.max_seq_length
+
+    if max_sequence_tokens is None:
+        raise RuntimeError("Embedding-модель не сообщает max_seq_length")
+
+    print(f"Максимум токенов модели: {max_sequence_tokens}")
+    print(f"Целевой размер чанка: {MAX_CHUNK_TOKENS}")
+    print(f"Перекрытие чанков: {OVERLAP_TOKENS}")
+
+    documents = load_documents(
+        model.tokenizer,
+        max_sequence_tokens,
     )
 
-    documents = load_documents()
-
-    print(
-        f"\nПодготовлено чанков: "
-        f"{len(documents)}"
-    )
+    print(f"\nПодготовлено чанков: " f"{len(documents)}")
 
     if not documents:
 
-        raise RuntimeError(
-            "Не удалось создать ни одного чанка"
-        )
+        raise RuntimeError("Не удалось создать ни одного чанка")
 
     client = QdrantClient(
         url=QDRANT_URL,
         timeout=120,
     )
 
-    print(
-        f"\nПодключение к Qdrant:\n"
-        f"{QDRANT_URL}"
-    )
+    print(f"\nПодключение к Qdrant:\n" f"{QDRANT_URL}")
 
     # Для первой версии каждый запуск
     # полностью пересоздаёт индекс.
@@ -693,9 +727,7 @@ def main() -> None:
     # Так проще:
     # не останутся старые чанки
     # после удаления или изменения MD.
-    if client.collection_exists(
-        COLLECTION_NAME
-    ):
+    if client.collection_exists(COLLECTION_NAME):
 
         print(
             "Удаление старой коллекции:",
@@ -703,8 +735,7 @@ def main() -> None:
         )
 
         client.delete_collection(
-            collection_name=
-                COLLECTION_NAME,
+            collection_name=COLLECTION_NAME,
         )
 
     print(
@@ -713,16 +744,10 @@ def main() -> None:
     )
 
     client.create_collection(
-
-        collection_name=
-            COLLECTION_NAME,
-
+        collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(
-
             size=vector_size,
-
-            distance=
-                Distance.COSINE,
+            distance=Distance.COSINE,
         ),
     )
 
@@ -737,27 +762,15 @@ def main() -> None:
         desc="Создание эмбеддингов",
     ):
 
-        batch = documents[
-            start:
-            start + QDRANT_BATCH_SIZE
-        ]
+        batch = documents[start : start + QDRANT_BATCH_SIZE]
 
-        texts = [
-            item["embedding_text"]
-            for item in batch
-        ]
+        texts = [item["embedding_text"] for item in batch]
 
         embeddings = model.encode(
-
             texts,
-
-            batch_size=
-                EMBEDDING_BATCH_SIZE,
-
+            batch_size=EMBEDDING_BATCH_SIZE,
             normalize_embeddings=True,
-
             show_progress_bar=False,
-
             convert_to_numpy=True,
         )
 
@@ -770,38 +783,23 @@ def main() -> None:
 
             points.append(
                 PointStruct(
-
                     id=item["id"],
-
-                    vector=
-                        vector.tolist(),
-
-                    payload=
-                        item["payload"],
+                    vector=vector.tolist(),
+                    payload=item["payload"],
                 )
             )
 
         client.upsert(
-
-            collection_name=
-                COLLECTION_NAME,
-
+            collection_name=COLLECTION_NAME,
             points=points,
-
             wait=True,
         )
 
-    collection = client.get_collection(
-        COLLECTION_NAME
-    )
+    collection = client.get_collection(COLLECTION_NAME)
 
-    print(
-        "\n================================"
-    )
+    print("\n================================")
 
-    print(
-        "Индексация завершена"
-    )
+    print("Индексация завершена")
 
     print(
         "Коллекция:",
@@ -823,9 +821,7 @@ def main() -> None:
         collection.status,
     )
 
-    print(
-        "================================"
-    )
+    print("================================")
 
 
 if __name__ == "__main__":

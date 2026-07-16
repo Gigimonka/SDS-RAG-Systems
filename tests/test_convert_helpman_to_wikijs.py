@@ -23,7 +23,9 @@ class ParseXmlTest(unittest.TestCase):
     def test_valid_utf8_with_bom_is_parsed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             source = Path(temporary_directory) / "topic.xml"
-            source.write_text("<topic><title>Тест</title></topic>", encoding="utf-8-sig")
+            source.write_text(
+                "<topic><title>Тест</title></topic>", encoding="utf-8-sig"
+            )
 
             root, recovered, error = parse_xml(source)
 
@@ -35,8 +37,7 @@ class ParseXmlTest(unittest.TestCase):
 
 class TableToMarkdownTest(unittest.TestCase):
     def test_single_cell_layout_table_is_unwrapped(self) -> None:
-        table = ET.fromstring(
-            """
+        table = ET.fromstring("""
             <table>
               <tr>
                 <td>
@@ -48,8 +49,7 @@ class TableToMarkdownTest(unittest.TestCase):
                 </td>
               </tr>
             </table>
-            """
-        )
+            """)
 
         markdown = table_to_md(table, {"variables": {}})
 
@@ -57,24 +57,20 @@ class TableToMarkdownTest(unittest.TestCase):
         self.assertNotIn("| --- |", markdown)
 
     def test_single_row_data_table_gets_safe_header(self) -> None:
-        table = ET.fromstring(
-            """
+        table = ET.fromstring("""
             <table>
               <tr>
                 <td><para><text>Статус чека</text></para></td>
                 <td><para><text>Требуется</text></para></td>
               </tr>
             </table>
-            """
-        )
+            """)
 
         markdown = table_to_md(table, {"variables": {}})
 
         self.assertEqual(
             markdown,
-            "| &nbsp; | &nbsp; |\n"
-            "| --- | --- |\n"
-            "| Статус чека | Требуется |",
+            "| &nbsp; | &nbsp; |\n" "| --- | --- |\n" "| Статус чека | Требуется |",
         )
 
 

@@ -14,4 +14,3 @@ def serve() -> None:
         host=os.getenv("RAG_HOST", "0.0.0.0"),
         port=int(os.getenv("RAG_PORT", "8000")),
     )
-
