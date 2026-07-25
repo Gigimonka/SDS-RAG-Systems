@@ -61,7 +61,7 @@ TOKENIZER_MODEL = os.getenv("TOKENIZER_MODEL", LLM_MODEL)
 
 RAG_MODEL_ID = os.getenv("RAG_MODEL_ID", "sds-wiki-rag")
 RAG_MODEL_NAME = os.getenv("RAG_MODEL_NAME", "Справочная система SDS")
-RAG_API_KEY = os.getenv("RAG_API_KEY", "sk-local-rag-change-me")
+RAG_API_KEY = os.getenv("RAG_API_KEY")
 
 RETRIEVAL_LIMIT = _env_int("RETRIEVAL_LIMIT", 20)
 MAX_CONTEXTS = _env_int("MAX_CONTEXTS", 10)

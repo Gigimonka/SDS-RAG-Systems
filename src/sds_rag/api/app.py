@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -8,9 +9,10 @@ from urllib.parse import quote
 
 import httpx
 import torch
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models
 from sentence_transformers import CrossEncoder, SentenceTransformer
@@ -391,12 +393,25 @@ def count_chat_tokens(
         )
 
 
-def verify_openai_key(
-    authorization: str | None,
-) -> None:
-    expected = f"Bearer {RAG_API_KEY}"
+bearer_scheme = HTTPBearer(
+    bearerFormat="API key",
+    auto_error=False,
+)
 
-    if authorization != expected:
+
+def verify_openai_key(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        bearer_scheme
+    ),
+) -> None:
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not secrets.compare_digest(
+            credentials.credentials,
+            RAG_API_KEY,
+        )
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid API key",
@@ -889,16 +904,8 @@ SYSTEM_PROMPT = """
 
 Отвечай по-русски.
 
-Давай подробный и содержательный ответ.
-
-Раскрывай все сведения, которые относятся к вопросу
-и подтверждаются источниками: основное правило,
-условия применения, последовательность действий,
-ограничения, исключения и важные примечания.
-
-Не ограничивай ответ фиксированным количеством абзацев.
-При этом не повторяй одну и ту же информацию
-и не пересказывай нерелевантные части документации.
+Для простого вопроса дай ответ
+в 3–5 абзацах.
 
 Для инструкции используй
 понятные нумерованные шаги.
@@ -1511,6 +1518,12 @@ def health() -> dict:
 @app.post(
     "/search",
     response_model=SearchResponse,
+    dependencies=[Depends(verify_openai_key)],
+    responses={
+        401: {
+            "description": "Invalid or missing API key",
+        },
+    },
 )
 async def search(
     request: SearchRequest,
@@ -1582,6 +1595,12 @@ async def search(
 @app.post(
     "/ask",
     response_model=AskResponse,
+    dependencies=[Depends(verify_openai_key)],
+    responses={
+        401: {
+            "description": "Invalid or missing API key",
+        },
+    },
 )
 async def ask(
     request: AskRequest,
@@ -1611,12 +1630,16 @@ async def ask(
 # ============================================================
 
 
-@app.get("/v1/models")
-def openai_models(
-    authorization: str | None = Header(default=None),
-) -> dict:
-    verify_openai_key(authorization)
-
+@app.get(
+    "/v1/models",
+    dependencies=[Depends(verify_openai_key)],
+    responses={
+        401: {
+            "description": "Invalid or missing API key",
+        },
+    },
+)
+def openai_models() -> dict:
     return {
         "object": "list",
         "data": [
@@ -1631,13 +1654,18 @@ def openai_models(
     }
 
 
-@app.post("/v1/chat/completions")
+@app.post(
+    "/v1/chat/completions",
+    dependencies=[Depends(verify_openai_key)],
+    responses={
+        401: {
+            "description": "Invalid or missing API key",
+        },
+    },
+)
 async def openai_chat_completions(
     request: ChatCompletionRequest,
-    authorization: str | None = Header(default=None),
 ):
-    verify_openai_key(authorization)
-
     question = get_last_user_question(request.messages)
 
     retrieval_query = make_retrieval_query(
